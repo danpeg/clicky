@@ -70,7 +70,7 @@ final class CompanionManager: ObservableObject {
 
     /// Base URL for the Cloudflare Worker proxy. All API requests route
     /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    private static let workerBaseURL = "https://clicky-proxy.danpeg.workers.dev"
 
     private lazy var claudeAPI: ClaudeAPI = {
         return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
@@ -123,6 +123,21 @@ final class CompanionManager: ObservableObject {
         ? true
         : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
 
+    /// Whether Clicky is in tutor mode — proactively guiding the user
+    /// through whatever software they're using by periodically screenshotting
+    /// and sending observations to Claude.
+    @Published var isTutorModeEnabled: Bool = UserDefaults.standard.bool(forKey: "isTutorModeEnabled")
+
+    func setTutorModeEnabled(_ enabled: Bool) {
+        isTutorModeEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isTutorModeEnabled")
+        if enabled {
+            startTutorIdleObservation()
+        } else {
+            stopTutorIdleObservation()
+        }
+    }
+
     func setClickyCursorEnabled(_ enabled: Bool) {
         isClickyCursorEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "isClickyCursorEnabled")
@@ -137,6 +152,15 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.hideOverlay()
             isOverlayVisible = false
         }
+    }
+
+    /// Whether Clicky's responses are automatically copied to the clipboard.
+    /// Defaults to OFF. Persisted to UserDefaults.
+    @Published var isAutoCopyResponseEnabled: Bool = UserDefaults.standard.bool(forKey: "isAutoCopyResponseEnabled")
+
+    func setAutoCopyResponseEnabled(_ enabled: Bool) {
+        isAutoCopyResponseEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isAutoCopyResponseEnabled")
     }
 
     /// Whether the user has completed onboarding at least once. Persisted
@@ -191,6 +215,11 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
+        }
+
+        // Resume tutor mode if it was previously enabled
+        if isTutorModeEnabled {
+            startTutorIdleObservation()
         }
     }
 
@@ -292,6 +321,7 @@ final class CompanionManager: ObservableObject {
         buddyDictationManager.cancelCurrentDictation()
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
+        stopTutorIdleObservation()
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
@@ -576,6 +606,33 @@ final class CompanionManager: ObservableObject {
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
+    private static let tutorModeSystemPrompt = """
+    you're clicky in tutor mode. the user wants to LEARN whatever software they're currently using. you are their hands-on instructor who can see their screen.
+
+    your job:
+    - proactively guide them step by step. don't wait to be asked
+    - if they just opened an app, welcome them and suggest where to start
+    - point at buttons, menus, and settings they should interact with. use [POINT] aggressively — a tutor who can point is way more useful than one who just talks
+    - after they complete a step, acknowledge it and tell them the next one
+    - if they go off track, gently redirect
+    - teach concepts as they become relevant, not all at once
+    - if they're doing well, say so and push them to the next level
+    - if the screen hasn't changed since your last observation, say something encouraging or suggest what to click next — don't repeat yourself
+
+    keep the warm clicky voice. short sentences. all lowercase, casual. you're a helpful friend walking them through it, not a corporate trainer.
+
+    important: check conversation history to avoid repeating what you already said. each observation should build on the last, not restart from scratch.
+
+    element pointing:
+    use the same [POINT:x,y:label] format as normal mode. point at the specific UI element the user should interact with next. if the element is on a different screen, append :screenN.
+
+    the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
+
+    format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2).
+
+    if pointing wouldn't help, append [POINT:none].
+    """
+
     // MARK: - AI Response Pipeline
 
     /// Captures a screenshot, sends it along with the transcript to Claude,
@@ -681,6 +738,12 @@ final class CompanionManager: ObservableObject {
                     print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
                 }
 
+                // Copy the clean response to the clipboard if the user has enabled auto-copy
+                if isAutoCopyResponseEnabled {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(spokenText, forType: .string)
+                }
+
                 // Save this exchange to conversation history (with the point tag
                 // stripped so it doesn't confuse future context)
                 conversationHistory.append((
@@ -755,6 +818,142 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    // MARK: - Tutor Mode Idle-Triggered Observations
+
+    let userActivityIdleDetector = UserActivityIdleDetector()
+    private var tutorIdleCancellable: AnyCancellable?
+    /// Guards against overlapping observations when the idle trigger
+    /// fires while a previous observation is still in flight.
+    private var isTutorObservationInFlight: Bool = false
+
+    private func startTutorIdleObservation() {
+        userActivityIdleDetector.start()
+        bindTutorIdleObservation()
+    }
+
+    private func stopTutorIdleObservation() {
+        tutorIdleCancellable?.cancel()
+        tutorIdleCancellable = nil
+        userActivityIdleDetector.stop()
+        isTutorObservationInFlight = false
+    }
+
+    private func bindTutorIdleObservation() {
+        tutorIdleCancellable?.cancel()
+        tutorIdleCancellable = userActivityIdleDetector.$isUserIdle
+            .filter { $0 == true }
+            .sink { [weak self] _ in
+                guard let self,
+                      self.isTutorModeEnabled,
+                      self.voiceState == .idle,
+                      !(self.elevenLabsTTSClient.isPlaying),
+                      !self.isTutorObservationInFlight else { return }
+                self.isTutorObservationInFlight = true
+                Task {
+                    await self.performTutorObservation()
+                    self.userActivityIdleDetector.observationDidComplete()
+                    self.isTutorObservationInFlight = false
+                }
+            }
+    }
+
+    private func performTutorObservation() async {
+        do {
+            let screenCaptures = try await CompanionScreenCaptureUtility.captureFocusedWindowAsJPEG()
+            guard !Task.isCancelled else { return }
+
+            let labeledImages = screenCaptures.map { capture in
+                let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                return (data: capture.imageData, label: capture.label + dimensionInfo)
+            }
+
+            let historyForAPI = conversationHistory.map { entry in
+                (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+            }
+
+            let (responseText, _) = try await claudeAPI.analyzeImageStreaming(
+                images: labeledImages,
+                systemPrompt: Self.tutorModeSystemPrompt,
+                conversationHistory: historyForAPI,
+                userPrompt: "observe the screen and guide me",
+                onTextChunk: { _ in }
+            )
+
+            guard !Task.isCancelled else { return }
+
+            let trimmedResponse = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedResponse.isEmpty else { return }
+
+            let parseResult = Self.parsePointingCoordinates(from: trimmedResponse)
+            let spokenText = parseResult.spokenText
+
+            // Handle element pointing if Claude returned coordinates
+            let hasPointCoordinate = parseResult.coordinate != nil
+            if hasPointCoordinate {
+                let targetScreenCapture: CompanionScreenCapture? = {
+                    if let screenNumber = parseResult.screenNumber,
+                       screenNumber >= 1 && screenNumber <= screenCaptures.count {
+                        return screenCaptures[screenNumber - 1]
+                    }
+                    return screenCaptures.first(where: { $0.isCursorScreen })
+                }()
+
+                if let pointCoordinate = parseResult.coordinate,
+                   let targetScreenCapture {
+                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
+                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
+                    let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
+                    let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
+                    let displayFrame = targetScreenCapture.displayFrame
+
+                    let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
+                    let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
+
+                    let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+                    let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+
+                    let appKitY = displayHeight - displayLocalY
+
+                    let globalLocation = CGPoint(
+                        x: displayLocalX + displayFrame.origin.x,
+                        y: appKitY + displayFrame.origin.y
+                    )
+
+                    detectedElementScreenLocation = globalLocation
+                    detectedElementDisplayFrame = displayFrame
+                    print("🎯 Tutor pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
+                }
+            }
+
+            if isAutoCopyResponseEnabled {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(spokenText, forType: .string)
+            }
+
+            conversationHistory.append((
+                userTranscript: "[tutor observation]",
+                assistantResponse: spokenText
+            ))
+
+            if conversationHistory.count > 10 {
+                conversationHistory.removeFirst(conversationHistory.count - 10)
+            }
+
+            // Play the response via TTS
+            if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                voiceState = .responding
+                do {
+                    try await elevenLabsTTSClient.speakText(spokenText)
+                } catch {
+                    print("⚠️ Tutor TTS error: \(error)")
+                }
+                voiceState = .idle
+            }
+        } catch {
+            print("⚠️ Tutor observation error: \(error)")
+        }
+    }
+
     /// Speaks a hardcoded error message using macOS system TTS when API
     /// credits run out. Uses NSSpeechSynthesizer so it works even when
     /// ElevenLabs is down.
@@ -783,17 +982,33 @@ final class CompanionManager: ObservableObject {
     /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
     static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
         // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
+        // anywhere in the text (not just at the end) so mid-sentence tags are also caught.
+        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]"#
 
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
               let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
-            // No tag found at all
-            return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
+            // No tag found — do a final cleanup pass in case Claude wrote
+            // coordinates inline without the proper tag format.
+            let cleaned = Self.stripResidualPointReferences(from: responseText)
+            return PointingParseResult(spokenText: cleaned, coordinate: nil, elementLabel: nil, screenNumber: nil)
         }
 
-        // Remove the tag from the spoken text
-        let tagRange = Range(match.range, in: responseText)!
-        let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Remove ALL [POINT:...] tags from the spoken text (there may be multiple)
+        let allTagPattern = #"\[POINT:[^\]]*\]"#
+        let spokenText: String
+        if let allTagRegex = try? NSRegularExpression(pattern: allTagPattern, options: []) {
+            let cleaned = allTagRegex.stringByReplacingMatches(
+                in: responseText,
+                range: NSRange(responseText.startIndex..., in: responseText),
+                withTemplate: ""
+            )
+            spokenText = Self.stripResidualPointReferences(from: cleaned)
+        } else {
+            let tagRange = Range(match.range, in: responseText)!
+            spokenText = Self.stripResidualPointReferences(
+                from: String(responseText[..<tagRange.lowerBound])
+            )
+        }
 
         // Check if it's [POINT:none]
         guard match.numberOfRanges >= 3,
@@ -820,6 +1035,23 @@ final class CompanionManager: ObservableObject {
             elementLabel: elementLabel,
             screenNumber: screenNumber
         )
+    }
+
+    /// Removes residual coordinate-like text that Claude sometimes writes
+    /// inline instead of using the proper [POINT:...] tag format — e.g.
+    /// "point 544,42" or "POINT:200,300" without brackets.
+    private static func stripResidualPointReferences(from text: String) -> String {
+        // Matches patterns like "point 544,42", "point:544,42", "POINT 200,300:label"
+        let residualPattern = #"(?i)\bpoint\s*:?\s*\d+\s*,\s*\d+(?::[^\s\.\,\!]*)?"#
+        guard let regex = try? NSRegularExpression(pattern: residualPattern, options: []) else {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let cleaned = regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: ""
+        )
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Onboarding Video
