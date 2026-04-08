@@ -8,7 +8,7 @@
             <sparkle:version>11</sparkle:version>
             <sparkle:shortVersionString>2.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/julianjear/makesomething-mac-app/releases/download/v2.0/makesomething.dmg" length="11852050" type="application/octet-stream" sparkle:edSignature="Y9o+YBln/BXAwYeJLuGV0E7B9q9/+kuhhFlNRyekZuYLPwbTYoL7aUYhurAQFfmiSuWuCUNHKXgtzaKCyaMGCQ=="/>
+            <enclosure url="https://github.com/YOUR_GITHUB_USERNAME/makesomething-mac-app/releases/download/v2.0/makesomething.dmg" length="11852050" type="application/octet-stream" sparkle:edSignature="Y9o+YBln/BXAwYeJLuGV0E7B9q9/+kuhhFlNRyekZuYLPwbTYoL7aUYhurAQFfmiSuWuCUNHKXgtzaKCyaMGCQ=="/>
         </item>
         <item>
             <title>1.9</title>
@@ -16,7 +16,7 @@
             <sparkle:version>10</sparkle:version>
             <sparkle:shortVersionString>1.9</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/julianjear/makesomething-mac-app/releases/download/v1.9/makesomething.dmg" length="11851619" type="application/octet-stream" sparkle:edSignature="l0OE/1XAsVgbyyP0vty+50oqzkTeR1yTRsuKtCU/m8UHduT/9cafKI/x1Vy5p8RW2t5JKDFIqmar/jRf6NRuDg=="/>
+            <enclosure url="https://github.com/YOUR_GITHUB_USERNAME/makesomething-mac-app/releases/download/v1.9/makesomething.dmg" length="11851619" type="application/octet-stream" sparkle:edSignature="l0OE/1XAsVgbyyP0vty+50oqzkTeR1yTRsuKtCU/m8UHduT/9cafKI/x1Vy5p8RW2t5JKDFIqmar/jRf6NRuDg=="/>
         </item>
         <item>
             <title>1.8</title>
@@ -24,7 +24,7 @@
             <sparkle:version>9</sparkle:version>
             <sparkle:shortVersionString>1.8</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/julianjear/makesomething-mac-app/releases/download/v1.8/makesomething.dmg" length="11489099" type="application/octet-stream" sparkle:edSignature="K7n75BUbzhzTbrnYDQDcsmMQGb3bEjvl5yxSIdBGtbanNWrEUym2sozah5hGkAQ0sLShrPhx8FDBunmd2T3rAw=="/>
+            <enclosure url="https://github.com/YOUR_GITHUB_USERNAME/makesomething-mac-app/releases/download/v1.8/makesomething.dmg" length="11489099" type="application/octet-stream" sparkle:edSignature="K7n75BUbzhzTbrnYDQDcsmMQGb3bEjvl5yxSIdBGtbanNWrEUym2sozah5hGkAQ0sLShrPhx8FDBunmd2T3rAw=="/>
         </item>
     </channel>
 </rss>

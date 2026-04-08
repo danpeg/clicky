@@ -2,6 +2,8 @@ worker/node_modules/
 worker/.dev.vars
 .DS_Store
 *.xcuserstate
+xcuserdata/
+*.xcuserdatad/
 build/
 releases/
 .claude/
