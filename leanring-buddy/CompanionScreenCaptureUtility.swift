@@ -192,43 +192,31 @@ enum CompanionScreenCaptureUtility {
             ? "focused window (\(appName))"
             : "focused window (\(appName) — \(windowTitle))"
 
-        // Use the display that contains the window for coordinate mapping
-        let mouseLocation = NSEvent.mouseLocation
-        var nsScreenByDisplayID: [CGDirectDisplayID: NSScreen] = [:]
-        for screen in NSScreen.screens {
-            if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID {
-                nsScreenByDisplayID[screenNumber] = screen
-            }
-        }
-
-        // Find the display containing this window's center point
-        let windowCenterCG = CGPoint(
-            x: targetWindow.frame.midX,
-            y: targetWindow.frame.midY
+        // Convert the window's CG frame (top-left origin) to AppKit
+        // coordinates (bottom-left origin) so the downstream coordinate
+        // mapping places the POINT cursor at the correct global location.
+        // The screenshot only contains the window, so Claude's coordinates
+        // are window-relative — we use the window's size and position,
+        // not the full display's.
+        let primaryScreenHeight = NSScreen.screens.first?.frame.height ?? CGFloat(windowHeight)
+        let windowAppKitOriginY = primaryScreenHeight - targetWindow.frame.origin.y - CGFloat(windowHeight)
+        let windowFrameInAppKit = CGRect(
+            x: targetWindow.frame.origin.x,
+            y: windowAppKitOriginY,
+            width: CGFloat(windowWidth),
+            height: CGFloat(windowHeight)
         )
-        let matchingDisplay = content.displays.first { display in
-            display.frame.contains(windowCenterCG)
-        }
-        let displayFrame: CGRect
-        let isCursorScreen: Bool
-        if let display = matchingDisplay, let nsScreen = nsScreenByDisplayID[display.displayID] {
-            displayFrame = nsScreen.frame
-            isCursorScreen = nsScreen.frame.contains(mouseLocation)
-        } else if let primaryScreen = NSScreen.screens.first {
-            displayFrame = primaryScreen.frame
-            isCursorScreen = true
-        } else {
-            displayFrame = CGRect(x: 0, y: 0, width: configuration.width, height: configuration.height)
-            isCursorScreen = true
-        }
+
+        let mouseLocation = NSEvent.mouseLocation
+        let isCursorScreen = windowFrameInAppKit.contains(mouseLocation)
 
         return [CompanionScreenCapture(
             imageData: jpegData,
             label: windowLabel,
             isCursorScreen: isCursorScreen,
-            displayWidthInPoints: Int(displayFrame.width),
-            displayHeightInPoints: Int(displayFrame.height),
-            displayFrame: displayFrame,
+            displayWidthInPoints: windowWidth,
+            displayHeightInPoints: windowHeight,
+            displayFrame: windowFrameInAppKit,
             screenshotWidthInPixels: configuration.width,
             screenshotHeightInPixels: configuration.height
         )]
