@@ -62,6 +62,14 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 16)
 
+                tutorModeToggleRow
+                    .padding(.horizontal, 16)
+            }
+
+            if companionManager.hasCompletedOnboarding && companionManager.allPermissionsGranted {
+                Spacer()
+                    .frame(height: 16)
+
                 dmFarzaButton
                     .padding(.horizontal, 16)
             }
@@ -565,6 +573,33 @@ struct CompanionPanelView: View {
             Toggle("", isOn: Binding(
                 get: { companionManager.isClickyCursorEnabled },
                 set: { companionManager.setClickyCursorEnabled($0) }
+            ))
+            .toggleStyle(.switch)
+            .labelsHidden()
+            .tint(DS.Colors.accent)
+            .scaleEffect(0.8)
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var tutorModeToggleRow: some View {
+        HStack {
+            HStack(spacing: 8) {
+                Image(systemName: "graduationcap")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(DS.Colors.textTertiary)
+                    .frame(width: 16)
+
+                Text("Tutor mode")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: Binding(
+                get: { companionManager.isTutorModeEnabled },
+                set: { companionManager.setTutorModeEnabled($0) }
             ))
             .toggleStyle(.switch)
             .labelsHidden()

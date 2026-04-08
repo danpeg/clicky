@@ -70,7 +70,7 @@ final class CompanionManager: ObservableObject {
 
     /// Base URL for the Cloudflare Worker proxy. All API requests route
     /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    private static let workerBaseURL = "https://clicky-proxy.danpeg.workers.dev"
 
     private lazy var claudeAPI: ClaudeAPI = {
         return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
@@ -122,6 +122,21 @@ final class CompanionManager: ObservableObject {
     @Published var isClickyCursorEnabled: Bool = UserDefaults.standard.object(forKey: "isClickyCursorEnabled") == nil
         ? true
         : UserDefaults.standard.bool(forKey: "isClickyCursorEnabled")
+
+    /// Whether Clicky is in tutor mode — proactively guiding the user
+    /// through whatever software they're using by periodically screenshotting
+    /// and sending observations to Claude.
+    @Published var isTutorModeEnabled: Bool = UserDefaults.standard.bool(forKey: "isTutorModeEnabled")
+
+    func setTutorModeEnabled(_ enabled: Bool) {
+        isTutorModeEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "isTutorModeEnabled")
+        if enabled {
+            startTutorObservationLoop()
+        } else {
+            stopTutorObservationLoop()
+        }
+    }
 
     func setClickyCursorEnabled(_ enabled: Bool) {
         isClickyCursorEnabled = enabled
@@ -191,6 +206,11 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.hasShownOverlayBefore = true
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
+        }
+
+        // Resume tutor mode if it was previously enabled
+        if isTutorModeEnabled {
+            startTutorObservationLoop()
         }
     }
 
@@ -292,6 +312,7 @@ final class CompanionManager: ObservableObject {
         buddyDictationManager.cancelCurrentDictation()
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
+        stopTutorObservationLoop()
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
@@ -576,6 +597,33 @@ final class CompanionManager: ObservableObject {
     - element is on screen 2 (not where cursor is): "that's over on your other monitor — see the terminal window? [POINT:400,300:terminal:screen2]"
     """
 
+    private static let tutorModeSystemPrompt = """
+    you're clicky in tutor mode. the user wants to LEARN whatever software they're currently using. you are their hands-on instructor who can see their screen.
+
+    your job:
+    - proactively guide them step by step. don't wait to be asked
+    - if they just opened an app, welcome them and suggest where to start
+    - point at buttons, menus, and settings they should interact with. use [POINT] aggressively — a tutor who can point is way more useful than one who just talks
+    - after they complete a step, acknowledge it and tell them the next one
+    - if they go off track, gently redirect
+    - teach concepts as they become relevant, not all at once
+    - if they're doing well, say so and push them to the next level
+    - if the screen hasn't changed since your last observation, say something encouraging or suggest what to click next — don't repeat yourself
+
+    keep the warm clicky voice. short sentences. all lowercase, casual. you're a helpful friend walking them through it, not a corporate trainer.
+
+    important: check conversation history to avoid repeating what you already said. each observation should build on the last, not restart from scratch.
+
+    element pointing:
+    use the same [POINT:x,y:label] format as normal mode. point at the specific UI element the user should interact with next. if the element is on a different screen, append :screenN.
+
+    the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
+
+    format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2).
+
+    if pointing wouldn't help, append [POINT:none].
+    """
+
     // MARK: - AI Response Pipeline
 
     /// Captures a screenshot, sends it along with the transcript to Claude,
@@ -752,6 +800,126 @@ final class CompanionManager: ObservableObject {
             guard !Task.isCancelled else { return }
             overlayWindowManager.fadeOutAndHideOverlay()
             isOverlayVisible = false
+        }
+    }
+
+    // MARK: - Tutor Mode Observation Loop
+
+    private var tutorObservationTask: Task<Void, Never>?
+    private static let tutorCheckIntervalSeconds: Double = 30
+
+    private func startTutorObservationLoop() {
+        stopTutorObservationLoop()
+        tutorObservationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.tutorCheckIntervalSeconds))
+                guard let self, !Task.isCancelled else { return }
+
+                // Don't interrupt active push-to-talk or TTS playback
+                guard self.voiceState == .idle,
+                      !(self.elevenLabsTTSClient.isPlaying) else {
+                    continue
+                }
+
+                await self.performTutorObservation()
+            }
+        }
+    }
+
+    private func stopTutorObservationLoop() {
+        tutorObservationTask?.cancel()
+        tutorObservationTask = nil
+    }
+
+    private func performTutorObservation() async {
+        do {
+            let screenCaptures = try await CompanionScreenCaptureUtility.captureFocusedWindowAsJPEG()
+            guard !Task.isCancelled else { return }
+
+            let labeledImages = screenCaptures.map { capture in
+                let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
+                return (data: capture.imageData, label: capture.label + dimensionInfo)
+            }
+
+            let historyForAPI = conversationHistory.map { entry in
+                (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
+            }
+
+            let (responseText, _) = try await claudeAPI.analyzeImageStreaming(
+                images: labeledImages,
+                systemPrompt: Self.tutorModeSystemPrompt,
+                conversationHistory: historyForAPI,
+                userPrompt: "observe the screen and guide me",
+                onTextChunk: { _ in }
+            )
+
+            guard !Task.isCancelled else { return }
+
+            let trimmedResponse = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedResponse.isEmpty else { return }
+
+            let parseResult = Self.parsePointingCoordinates(from: trimmedResponse)
+            let spokenText = parseResult.spokenText
+
+            // Handle element pointing if Claude returned coordinates
+            let hasPointCoordinate = parseResult.coordinate != nil
+            if hasPointCoordinate {
+                let targetScreenCapture: CompanionScreenCapture? = {
+                    if let screenNumber = parseResult.screenNumber,
+                       screenNumber >= 1 && screenNumber <= screenCaptures.count {
+                        return screenCaptures[screenNumber - 1]
+                    }
+                    return screenCaptures.first(where: { $0.isCursorScreen })
+                }()
+
+                if let pointCoordinate = parseResult.coordinate,
+                   let targetScreenCapture {
+                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
+                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
+                    let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
+                    let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
+                    let displayFrame = targetScreenCapture.displayFrame
+
+                    let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
+                    let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
+
+                    let displayLocalX = clampedX * (displayWidth / screenshotWidth)
+                    let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+
+                    let appKitY = displayHeight - displayLocalY
+
+                    let globalLocation = CGPoint(
+                        x: displayLocalX + displayFrame.origin.x,
+                        y: appKitY + displayFrame.origin.y
+                    )
+
+                    detectedElementScreenLocation = globalLocation
+                    detectedElementDisplayFrame = displayFrame
+                    print("🎯 Tutor pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
+                }
+            }
+
+            conversationHistory.append((
+                userTranscript: "[tutor observation]",
+                assistantResponse: spokenText
+            ))
+
+            if conversationHistory.count > 10 {
+                conversationHistory.removeFirst(conversationHistory.count - 10)
+            }
+
+            // Play the response via TTS
+            if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                voiceState = .responding
+                do {
+                    try await elevenLabsTTSClient.speakText(spokenText)
+                } catch {
+                    print("⚠️ Tutor TTS error: \(error)")
+                }
+                voiceState = .idle
+            }
+        } catch {
+            print("⚠️ Tutor observation error: \(error)")
         }
     }
 
