@@ -966,17 +966,33 @@ final class CompanionManager: ObservableObject {
     /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
     static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
         // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
+        // anywhere in the text (not just at the end) so mid-sentence tags are also caught.
+        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]"#
 
         guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
               let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
-            // No tag found at all
-            return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
+            // No tag found — do a final cleanup pass in case Claude wrote
+            // coordinates inline without the proper tag format.
+            let cleaned = Self.stripResidualPointReferences(from: responseText)
+            return PointingParseResult(spokenText: cleaned, coordinate: nil, elementLabel: nil, screenNumber: nil)
         }
 
-        // Remove the tag from the spoken text
-        let tagRange = Range(match.range, in: responseText)!
-        let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Remove ALL [POINT:...] tags from the spoken text (there may be multiple)
+        let allTagPattern = #"\[POINT:[^\]]*\]"#
+        let spokenText: String
+        if let allTagRegex = try? NSRegularExpression(pattern: allTagPattern, options: []) {
+            let cleaned = allTagRegex.stringByReplacingMatches(
+                in: responseText,
+                range: NSRange(responseText.startIndex..., in: responseText),
+                withTemplate: ""
+            )
+            spokenText = Self.stripResidualPointReferences(from: cleaned)
+        } else {
+            let tagRange = Range(match.range, in: responseText)!
+            spokenText = Self.stripResidualPointReferences(
+                from: String(responseText[..<tagRange.lowerBound])
+            )
+        }
 
         // Check if it's [POINT:none]
         guard match.numberOfRanges >= 3,
@@ -1003,6 +1019,23 @@ final class CompanionManager: ObservableObject {
             elementLabel: elementLabel,
             screenNumber: screenNumber
         )
+    }
+
+    /// Removes residual coordinate-like text that Claude sometimes writes
+    /// inline instead of using the proper [POINT:...] tag format — e.g.
+    /// "point 544,42" or "POINT:200,300" without brackets.
+    private static func stripResidualPointReferences(from text: String) -> String {
+        // Matches patterns like "point 544,42", "point:544,42", "POINT 200,300:label"
+        let residualPattern = #"(?i)\bpoint\s*:?\s*\d+\s*,\s*\d+(?::[^\s\.\,\!]*)?"#
+        guard let regex = try? NSRegularExpression(pattern: residualPattern, options: []) else {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let cleaned = regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: ""
+        )
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // MARK: - Onboarding Video
