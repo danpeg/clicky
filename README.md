@@ -1,3 +1,16 @@
+## What's new in this fork
+
+### Tutor Mode
+Toggle on "Tutor mode" from the menu bar panel (graduation cap icon) and Clicky becomes a proactive instructor. Instead of waiting for you to push-to-talk, it watches what you're doing and guides you step by step — pointing at buttons, explaining what things do, and suggesting what to try next. It uses idle detection to trigger at natural break points: when you pause for a few seconds after an action, Clicky observes and speaks. You can still push-to-talk to ask questions or redirect the tutor mid-session — both share the same conversation history so the tutor remembers what you discussed.
+
+### Focused Window Screenshots
+Tutor mode captures only the frontmost window of the app you're using, not your entire screen. This gives Claude a much sharper, more focused image to work with — no desktop clutter, no second monitors, just the app you're learning. The cursor pointing coordinates map correctly to the window's position on screen. Falls back to full-screen capture if no window is found.
+
+### Auto-Copy LLM Responses
+Toggle on "Copy responses" from the menu bar panel and every response from Claude (both push-to-talk and tutor observations) gets automatically copied to your clipboard. Useful when Clicky explains something you want to paste into notes, a doc, or a chat.
+
+---
+
 # Hi, this is Clicky.
 It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff. Kinda like having a real teacher next to you.
 
@@ -8,6 +21,10 @@ Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) th
 ![Clicky — an ai buddy that lives on your mac](clicky-demo.gif)
 
 This is the open-source version of Clicky for those that want to hack on it, build their own features, or just see how it works under the hood.
+
+---
+
+
 
 ## Get started with Claude Code
 
