@@ -132,9 +132,9 @@ final class CompanionManager: ObservableObject {
         isTutorModeEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: "isTutorModeEnabled")
         if enabled {
-            startTutorObservationLoop()
+            startTutorIdleObservation()
         } else {
-            stopTutorObservationLoop()
+            stopTutorIdleObservation()
         }
     }
 
@@ -219,7 +219,7 @@ final class CompanionManager: ObservableObject {
 
         // Resume tutor mode if it was previously enabled
         if isTutorModeEnabled {
-            startTutorObservationLoop()
+            startTutorIdleObservation()
         }
     }
 
@@ -321,7 +321,7 @@ final class CompanionManager: ObservableObject {
         buddyDictationManager.cancelCurrentDictation()
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
-        stopTutorObservationLoop()
+        stopTutorIdleObservation()
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
@@ -818,32 +818,43 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    // MARK: - Tutor Mode Observation Loop
+    // MARK: - Tutor Mode Idle-Triggered Observations
 
-    private var tutorObservationTask: Task<Void, Never>?
-    private static let tutorCheckIntervalSeconds: Double = 30
+    let userActivityIdleDetector = UserActivityIdleDetector()
+    private var tutorIdleCancellable: AnyCancellable?
+    /// Guards against overlapping observations when the idle trigger
+    /// fires while a previous observation is still in flight.
+    private var isTutorObservationInFlight: Bool = false
 
-    private func startTutorObservationLoop() {
-        stopTutorObservationLoop()
-        tutorObservationTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.tutorCheckIntervalSeconds))
-                guard let self, !Task.isCancelled else { return }
-
-                // Don't interrupt active push-to-talk or TTS playback
-                guard self.voiceState == .idle,
-                      !(self.elevenLabsTTSClient.isPlaying) else {
-                    continue
-                }
-
-                await self.performTutorObservation()
-            }
-        }
+    private func startTutorIdleObservation() {
+        userActivityIdleDetector.start()
+        bindTutorIdleObservation()
     }
 
-    private func stopTutorObservationLoop() {
-        tutorObservationTask?.cancel()
-        tutorObservationTask = nil
+    private func stopTutorIdleObservation() {
+        tutorIdleCancellable?.cancel()
+        tutorIdleCancellable = nil
+        userActivityIdleDetector.stop()
+        isTutorObservationInFlight = false
+    }
+
+    private func bindTutorIdleObservation() {
+        tutorIdleCancellable?.cancel()
+        tutorIdleCancellable = userActivityIdleDetector.$isUserIdle
+            .filter { $0 == true }
+            .sink { [weak self] _ in
+                guard let self,
+                      self.isTutorModeEnabled,
+                      self.voiceState == .idle,
+                      !(self.elevenLabsTTSClient.isPlaying),
+                      !self.isTutorObservationInFlight else { return }
+                self.isTutorObservationInFlight = true
+                Task {
+                    await self.performTutorObservation()
+                    self.userActivityIdleDetector.observationDidComplete()
+                    self.isTutorObservationInFlight = false
+                }
+            }
     }
 
     private func performTutorObservation() async {
@@ -912,6 +923,11 @@ final class CompanionManager: ObservableObject {
                     detectedElementDisplayFrame = displayFrame
                     print("🎯 Tutor pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
                 }
+            }
+
+            if isAutoCopyResponseEnabled {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(spokenText, forType: .string)
             }
 
             conversationHistory.append((
